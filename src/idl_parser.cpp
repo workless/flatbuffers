@@ -707,6 +707,7 @@ CheckedError Parser::ParseField(StructDef &struct_def) {
     // with a special suffix.
     ECHECK(AddField(struct_def, name + UnionTypeFieldSuffix(),
                     type.enum_def->underlying_type, &typefield));
+    typefield->auto_generated = true;
   } else if (type.base_type == BASE_TYPE_VECTOR &&
              type.element == BASE_TYPE_UNION) {
     // Only cpp, js and ts supports the union vector feature so far.
@@ -721,6 +722,7 @@ CheckedError Parser::ParseField(StructDef &struct_def) {
     union_vector.element = BASE_TYPE_UTYPE;
     ECHECK(AddField(struct_def, name + UnionTypeFieldSuffix(), union_vector,
                     &typefield));
+    typefield->auto_generated = true;
   }
 
   FieldDef *field;

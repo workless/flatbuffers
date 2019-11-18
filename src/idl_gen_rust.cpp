@@ -547,7 +547,24 @@ class RustGenerator : public BaseGenerator {
     const EnumVal *maxv = enum_def.MaxValue();
     FLATBUFFERS_ASSERT(minv && maxv);
 
+    code_ += "}";
     code_ += "";
+
+    code_ += "#[allow(non_camel_case_types)]";
+    code_ += "#[derive(Clone, Debug)]";
+    code_ += "pub enum " + Name(enum_def) + "Ex {";
+    for (auto it = enum_def.Vals().begin(); it != enum_def.Vals().end(); ++it) {
+      const auto &ev = **it;
+
+      GenComment(ev.doc_comment, "  ");
+      code_.SetValue("KEY", Name(ev));
+      if (ev.union_type.base_type == BASE_TYPE_NONE) {
+        code_ += "  {{KEY}}(),";
+      } else {
+        code_.SetValue("TYPE",  ev.union_type.struct_def->name);
+        code_ += "  {{KEY}}( {{TYPE}}Ex ),";
+      }
+    }
     code_ += "}";
     code_ += "";
 
@@ -779,6 +796,84 @@ class RustGenerator : public BaseGenerator {
                ", flatbuffers::ForwardsUOffset<"
                "flatbuffers::Table<" +
                lifetime + ">>>>";
+      }
+    }
+    return "INVALID_CODE_GENERATION";  // for return analysis
+  }
+
+  std::string TableBuilderExDefnType(const FieldDef &field) {
+    const Type &type = field.value.type;
+
+    switch (GetFullType(type)) {
+      case ftInteger:
+      case ftFloat:
+      case ftBool: {
+        const auto typname = GetTypeBasic(type);
+        return typname;
+      }
+      case ftStruct: {
+        const auto typname = WrapInNameSpace(*type.struct_def);
+        if (field.required) {
+          return "Box<" + typname + "Ex>";
+        } else {
+          return "Option<Box<" + typname + "Ex>>";
+        }
+      }
+      case ftTable: {
+        const auto typname = WrapInNameSpace(*type.struct_def);
+        if (field.required) {
+          return "Box<" + typname + "Ex>";
+        } else {
+          return "Option<Box<" + typname + "Ex>>";
+        }
+      }
+      case ftString: {
+        if (field.required) {
+          return "String";
+        } else {
+          return "Option<String>";
+        }
+      }
+      case ftEnumKey:
+      case ftUnionKey: {
+        const auto typname = WrapInNameSpace(*type.enum_def);
+        return "Box<"+typname+"Ex>";
+      }
+      case ftUnionValue: {
+        const auto typname = WrapInNameSpace(*type.enum_def);
+        if (field.required) {
+          return "Box<" + typname + "Ex>";
+        } else {
+          return "Option<Box<" + typname + "Ex>>";
+        }
+      }
+      case ftVectorOfInteger:
+      case ftVectorOfFloat: {
+        const auto typname = GetTypeBasic(type.VectorType());
+        return "Vec<"+ typname + ">";
+      }
+      case ftVectorOfBool: {
+        return "Vec<bool>";
+      }
+      case ftVectorOfEnumKey: {
+        const auto typname = WrapInNameSpace(*type.enum_def);
+        return "Vec<" + typname + "Ex>";
+      }
+      case ftVectorOfStruct: {
+        const auto typname = WrapInNameSpace(*type.struct_def);
+        return "Vec<" + typname + "Ex>";
+      }
+      case ftVectorOfTable: {
+        const auto typname = WrapInNameSpace(*type.struct_def);
+        return "Vec<" + typname + "Ex>";
+      }
+      case ftVectorOfString: {
+        return "Vec<String>";
+      }
+      case ftVectorOfUnionValue: {
+        const auto typname =
+            WrapInNameSpace(*type.enum_def);
+        return "Vec<" + typname + "Ex>";
       }
     }
     return "INVALID_CODE_GENERATION";  // for return analysis
@@ -1293,7 +1388,46 @@ class RustGenerator : public BaseGenerator {
         code_ += "  }";
       }
     }
+   
+/*
+    code_ += "  pub fn extract(&self) -> {{STRUCT_NAME}}Ex {";
+    code_ += "    {{STRUCT_NAME}}Ex {";
+    
+    for (auto it = struct_def.fields.vec.begin();
+         it != struct_def.fields.vec.end(); ++it) {
+      const auto &field = **it;
+      if (field.deprecated || field.auto_generated) {
+        continue;
+      }
+      const bool is_vector = field.value.type.base_type == BASE_TYPE_VECTOR;
+      const BaseType type = is_vector ? field.value.type.element : field.value.type.base_type;
+    
+      if (type == BASE_TYPE_STRUCT || type == BASE_TYPE_UNION) {
+        code_.SetValue("MAYBE_EXCTRACT", ".extract()"); 
+      } else if (type == BASE_TYPE_ARRAY) {
+        code_.SetValue("MAYBE_EXCTRACT", "[..]"); 
+      } else {
+        code_.SetValue("MAYBE_EXCTRACT", ""); 
+      }
+      code_.SetValue("FIELD_NAME", Name(field));
+      
+      if (is_vector) {
+        code_ += "      {{FIELD_NAME}}: { ";
+        code_ += "        let mut vec = vec!();";
+        code_ += "        let source = self.{{FIELD_NAME}}();";
+        code_ += "        for num in 0..source.len() {";
+        code_ += "          vec.push(Box::new(source.get(num){{MAYBE_EXCTRACT}}))";
+        code_ += "        }";
+        code_ += "        vec";
+        code_ += "      },";
+      } else {
+        code_ += "      {{FIELD_NAME}}: self.{{FIELD_NAME}}(){{MAYBE_EXCTRACT}}, ";
+      }
+    }
+    code_ += "    }";
+    code_ += "  }";
 
+    */
     // Explicit specializations for union accessors
     for (auto it = struct_def.fields.vec.begin();
          it != struct_def.fields.vec.end(); ++it) {
@@ -1355,6 +1489,21 @@ class RustGenerator : public BaseGenerator {
       }
     }
     code_ += "}";
+
+    //Generated extracted structs
+    code_ += "#[derive(Clone, Debug)]";
+    code_ += "pub struct {{STRUCT_NAME}}Ex {";
+    for (auto it = struct_def.fields.vec.begin();
+         it != struct_def.fields.vec.end(); ++it) {
+      const auto &field = **it;
+      if (!field.deprecated && !field.auto_generated) {
+        code_.SetValue("PARAM_NAME", Name(field));
+        code_.SetValue("PARAM_TYPE", TableBuilderExDefnType(field));
+        code_ += "    pub {{PARAM_NAME}}: {{PARAM_TYPE}},";
+      }
+    }
+    code_ += "}";
+
 
     // Generate an impl of Default for the *Args type:
     code_ += "impl<'a> Default for {{STRUCT_NAME}}Args{{MAYBE_LT}} {";
