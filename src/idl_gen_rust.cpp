@@ -1131,7 +1131,64 @@ class RustGenerator : public BaseGenerator {
       default: return true;
     }
   }
+  
+  bool IsBaseTypeWithoutOptions(const Type &type) {
+    switch (GetFullType(type)) {
+      case ftInteger:
+      case ftFloat:
+      case ftBool:
+      case ftEnumKey:
+      case ftUnionKey: return true;
+      default: return false;
+    }
+  }
 
+  std::string GenWriteToField(const FieldDef &field, const std::string &name, const std::string &struct_name) {
+    switch (GetFullType(field.value.type)) {
+      case ftInteger:
+      case ftFloat: 
+      case ftBool: 
+      case ftEnumKey:
+      case ftUnionKey:
+      case ftUnionValue:
+        return name;
+      case ftStruct: 
+      case ftTable: 
+        return 
+        name+".write_to(_fbb)";
+
+      case ftString:
+        return
+        "_fbb.create_string("+name+")";
+        
+      case ftVectorOfInteger:
+      case ftVectorOfFloat:
+      case ftVectorOfBool:
+      case ftVectorOfEnumKey:
+      case ftVectorOfStruct:
+        return
+        "_fbb.create_vector_direct("+name+")";
+        
+      case ftVectorOfTable:
+        return //we cannot nest vector or table creation
+        "{" 
+        " let mut tmp = vec!();"
+        " for x in "+name+" { tmp.push(x.write_to(_fbb)) } "
+        " let tmp_len = tmp.len();"
+        ""
+        "  _fbb.start_vector::<flatbuffers::WIPOffset<"+struct_name+">>(tmp_len);"
+        "    for x in tmp { _fbb.push(x); } "
+        " _fbb.end_vector(tmp_len)"
+        "}";
+      case ftVectorOfString:
+        return
+        " _fbb.create_vector_of_strings("+name+")";
+      case ftVectorOfUnionValue:
+        return "INVALID_CODE_GENERATION";
+    }
+    return "INVALID_CODE_GENERATION";  // for return analysis
+  }
+  
   // Generate an accessor struct, builder struct, and create function for a
   // table.
   void GenTable(const StructDef &struct_def) {
@@ -1208,6 +1265,78 @@ class RustGenerator : public BaseGenerator {
     code_ += "      builder.finish()";
     code_ += "    }";
     code_ += "";
+    
+    //////////////////////
+    
+    // Generate a convenient write_to* function which write a copy of the table
+    code_.SetValue("MAYBE_US", struct_def.fields.vec.size() == 0 ? "_" : "");
+    code_.SetValue("MAYBE_LT",
+                   TableBuilderArgsNeedsLifetime(struct_def) ? "<'args>" : "");
+    code_ += "    #[allow(unused_mut)]";
+    code_ += "    pub fn write_to<'wr_to>(&self,";
+    code_ += "          _fbb: &mut flatbuffers::FlatBufferBuilder<'wr_to>)"
+             " -> flatbuffers::WIPOffset<{{STRUCT_NAME}}<'wr_to>> {";
+    
+    for (size_t size = struct_def.sortbysize ? sizeof(largest_scalar_t) : 1;
+         size; size /= 2) {
+      for (auto it = struct_def.fields.vec.rbegin();
+           it != struct_def.fields.vec.rend(); ++it) {
+        const auto &field = **it;
+      
+        if (!field.deprecated && (!struct_def.sortbysize ||
+                                  size == SizeOf(field.value.type.base_type))) {
+          code_.SetValue("FIELD_NAME", Name(field));
+          if (field.value.type.base_type == BASE_TYPE_UNION) {
+              code_ +=  
+                  "      let {{FIELD_NAME}} = self.{{FIELD_NAME}}_write_to(_fbb);";
+          } else {
+            if (field.required || IsBaseTypeWithoutOptions(field.value.type)) {
+              code_.SetValue("FIELD_VALUE", GenWriteToField(field, "self."+Name(field)+"()", Name(struct_def)));
+              code_ +=   
+                  "      let {{FIELD_NAME}} = {{FIELD_VALUE}};";
+            } else {
+              code_.SetValue("FIELD_VALUE", GenWriteToField(field, "u", Name(struct_def)));
+              code_ +=
+                  "      let {{FIELD_NAME}} = "
+                  " { match self.{{FIELD_NAME}}() { Some(u) => Some({{FIELD_VALUE}}), _ => None } };";
+            }
+          }
+        }
+      }
+    }
+    
+    code_ += "      let mut builder = {{STRUCT_NAME}}Builder::new(_fbb);";
+        
+    for (size_t size = struct_def.sortbysize ? sizeof(largest_scalar_t) : 1;
+         size; size /= 2) {
+      for (auto it = struct_def.fields.vec.rbegin();
+           it != struct_def.fields.vec.rend(); ++it) {
+        const auto &field = **it;
+      
+        if (!field.deprecated && (!struct_def.sortbysize ||
+                                  size == SizeOf(field.value.type.base_type))) {
+          code_.SetValue("FIELD_NAME", Name(field));
+          if (field.value.type.base_type == BASE_TYPE_UNION) {
+              code_ +=  
+                  "      {{FIELD_NAME}}.map(|u| builder.add_{{FIELD_NAME}}(u));";
+          } else {
+            if (field.required || IsBaseTypeWithoutOptions(field.value.type)) {
+              code_ +=   
+                  "      builder.add_{{FIELD_NAME}}({{FIELD_NAME}});";
+            } else {
+              code_ +=
+                  "      if let Some(u) = {{FIELD_NAME}} { builder.add_{{FIELD_NAME}}(u); } ";
+            }
+          }
+        }
+      }
+    }
+    
+    code_ += "      builder.finish()";
+    code_ += "    }";
+    code_ += "";
+    
+    ////////////
 
     // Generate field id constants.
     if (struct_def.fields.vec.size() > 0) {
@@ -1341,6 +1470,43 @@ class RustGenerator : public BaseGenerator {
         code_ += "  }";
         code_ += "";
       }
+      
+      ////////////////////
+      code_ += "  #[inline]";
+      code_ += "  #[allow(non_snake_case)]";
+      code_ +=
+            "  pub fn {{FIELD_NAME}}_write_to<'wr_to>(&self, _fbb: &mut flatbuffers::FlatBufferBuilder<'wr_to>) ->"
+            " Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>> {";
+        
+      for (auto u_it = u->Vals().begin(); u_it != u->Vals().end(); ++u_it) {
+        auto &ev = **u_it;
+        if (ev.union_type.base_type == BASE_TYPE_NONE) { continue; }
+
+        auto table_init_type =
+            WrapInNameSpace(ev.union_type.struct_def->defined_namespace,
+                            ev.union_type.struct_def->name);
+
+        code_.SetValue(
+            "U_ELEMENT_ENUM_TYPE",
+            WrapInNameSpace(u->defined_namespace, GetEnumValUse(*u, ev)));
+        code_.SetValue("U_ELEMENT_TABLE_TYPE", table_init_type);
+        code_.SetValue("U_ELEMENT_NAME", MakeSnakeCase(Name(ev)));
+        code_ +=
+            "    if self.{{FIELD_NAME}}_type() == {{U_ELEMENT_ENUM_TYPE}} {";
+        if (field.required) {
+          code_ +=
+            "      return Some({{U_ELEMENT_TABLE_TYPE}}::init_from_table(self.{{FIELD_NAME}}()).write_to(_fbb).as_union_value());";
+        } else {
+          code_ +=
+            "      return self.{{FIELD_NAME}}().map(|u| "
+            "{{U_ELEMENT_TABLE_TYPE}}::init_from_table(u).write_to(_fbb).as_union_value());";
+        }
+        code_ += 
+            "    }";
+      }
+      code_ += "    None";
+      code_ += "  }";
+      code_ += "";
     }
 
     code_ += "}";  // End of table impl.
