@@ -383,7 +383,7 @@ impl<'fbb> FlatBufferBuilder<'fbb> {
     }
 
     #[inline]
-    fn used_space(&self) -> usize {
+    pub fn used_space(&self) -> usize {
         self.owned_buf.len() - self.head as usize
     }
 
